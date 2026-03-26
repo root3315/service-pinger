@@ -226,7 +226,7 @@ def load_services_from_file(filepath: str) -> List[str]:
     return services
 
 
-def format_result(result: ServiceResult, verbose: bool = False) -> str:
+def format_result(result: ServiceResult, verbose: bool = False, no_color: bool = False) -> str:
     """Format a single result for display."""
     status_icons = {
         "UP": "✓",
@@ -234,17 +234,17 @@ def format_result(result: ServiceResult, verbose: bool = False) -> str:
         "DEGRADED": "!",
         "ERROR": "?"
     }
-    
+
     status_colors = {
         "UP": "\033[92m",
         "DOWN": "\033[91m",
         "DEGRADED": "\033[93m",
         "ERROR": "\033[95m"
     }
-    
-    reset = "\033[0m"
+
+    reset = "\033[0m" if not no_color else ""
     icon = status_icons.get(result.status, "?")
-    color = status_colors.get(result.status, "")
+    color = status_colors.get(result.status, "") if not no_color else ""
     
     if result.response_time_ms is not None:
         time_str = f"{result.response_time_ms}ms"
@@ -358,10 +358,10 @@ Examples:
     print("-" * 60)
     
     results = ping_services(services, args.timeout, args.workers, args.verbose)
-    
+
     for result in results:
-        print(format_result(result, args.verbose))
-    
+        print(format_result(result, args.verbose, args.no_color))
+
     print_summary(results)
 
 
