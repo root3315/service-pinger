@@ -21,6 +21,10 @@ except ImportError:
     HAS_REQUESTS = False
 
 
+DEFAULT_MAX_RETRIES = 0
+DEFAULT_BACKOFF_BASE = 2
+
+
 @dataclass
 class ServiceResult:
     """Result of a service health check."""
@@ -31,19 +35,20 @@ class ServiceResult:
     status_code: Optional[int]
     error: Optional[str]
     timestamp: str
+    retries: int = 0
 
 
 def parse_service_url(url: str) -> Tuple[str, str, int]:
     """Parse a service URL into protocol, host, and port."""
     parsed = urlparse(url)
-    
+
     if not parsed.scheme:
         url = f"http://{url}"
         parsed = urlparse(url)
-    
+
     scheme = parsed.scheme.lower()
     host = parsed.hostname or "localhost"
-    
+
     if parsed.port:
         port = parsed.port
     elif scheme == "https":
@@ -52,15 +57,16 @@ def parse_service_url(url: str) -> Tuple[str, str, int]:
         port = 80
     else:
         port = 443 if scheme == "https" else 80
-    
+
     return scheme, host, port
 
 
-def check_http_service(url: str, timeout: int) -> ServiceResult:
+def check_http_service(url: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES,
+                       backoff_base: float = DEFAULT_BACKOFF_BASE) -> ServiceResult:
     """Check an HTTP/HTTPS service using requests library."""
     name = urlparse(url).hostname or url
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     if not HAS_REQUESTS:
         return ServiceResult(
             name=name,
@@ -71,141 +77,116 @@ def check_http_service(url: str, timeout: int) -> ServiceResult:
             error="requests library not installed",
             timestamp=timestamp
         )
-    
-    try:
-        start_time = time.time()
-        response = requests.get(url, timeout=timeout, verify=True)
-        elapsed_ms = (time.time() - start_time) * 1000
-        
-        if 200 <= response.status_code < 400:
-            status = "UP"
-        else:
-            status = "DEGRADED"
-        
-        return ServiceResult(
-            name=name,
-            url=url,
-            status=status,
-            response_time_ms=round(elapsed_ms, 2),
-            status_code=response.status_code,
-            error=None,
-            timestamp=timestamp
-        )
-    except requests.exceptions.SSLError as e:
-        return ServiceResult(
-            name=name,
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error=f"SSL error: {str(e)}",
-            timestamp=timestamp
-        )
-    except requests.exceptions.ConnectionError as e:
-        return ServiceResult(
-            name=name,
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error=f"Connection failed: {str(e)}",
-            timestamp=timestamp
-        )
-    except requests.exceptions.Timeout:
-        return ServiceResult(
-            name=name,
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error="Request timed out",
-            timestamp=timestamp
-        )
-    except requests.exceptions.RequestException as e:
-        return ServiceResult(
-            name=name,
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error=str(e),
-            timestamp=timestamp
-        )
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            start_time = time.time()
+            response = requests.get(url, timeout=timeout, verify=True)
+            elapsed_ms = (time.time() - start_time) * 1000
+
+            if 200 <= response.status_code < 400:
+                status = "UP"
+            else:
+                status = "DEGRADED"
+
+            return ServiceResult(
+                name=name,
+                url=url,
+                status=status,
+                response_time_ms=round(elapsed_ms, 2),
+                status_code=response.status_code,
+                error=None,
+                timestamp=timestamp,
+                retries=attempt
+            )
+        except requests.exceptions.SSLError as e:
+            last_error = f"SSL error: {str(e)}"
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"Connection failed: {str(e)}"
+        except requests.exceptions.Timeout:
+            last_error = "Request timed out"
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+
+        if attempt < max_retries:
+            delay = backoff_base ** attempt
+            time.sleep(delay)
+
+    return ServiceResult(
+        name=name,
+        url=url,
+        status="DOWN",
+        response_time_ms=None,
+        status_code=None,
+        error=last_error,
+        timestamp=timestamp,
+        retries=max_retries
+    )
 
 
-def check_tcp_service(host: str, port: int, timeout: int) -> ServiceResult:
+def check_tcp_service(host: str, port: int, timeout: int,
+                      max_retries: int = DEFAULT_MAX_RETRIES,
+                      backoff_base: float = DEFAULT_BACKOFF_BASE) -> ServiceResult:
     """Check a TCP service by attempting to establish a connection."""
     url = f"{host}:{port}"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    try:
-        start_time = time.time()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((host, port))
-        elapsed_ms = (time.time() - start_time) * 1000
-        sock.close()
-        
-        if result == 0:
-            return ServiceResult(
-                name=f"{host}:{port}",
-                url=url,
-                status="UP",
-                response_time_ms=round(elapsed_ms, 2),
-                status_code=None,
-                error=None,
-                timestamp=timestamp
-            )
-        else:
-            return ServiceResult(
-                name=f"{host}:{port}",
-                url=url,
-                status="DOWN",
-                response_time_ms=None,
-                status_code=None,
-                error=f"Connection refused (error code: {result})",
-                timestamp=timestamp
-            )
-    except socket.timeout:
-        return ServiceResult(
-            name=f"{host}:{port}",
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error="Connection timed out",
-            timestamp=timestamp
-        )
-    except socket.gaierror as e:
-        return ServiceResult(
-            name=f"{host}:{port}",
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error=f"DNS resolution failed: {str(e)}",
-            timestamp=timestamp
-        )
-    except OSError as e:
-        return ServiceResult(
-            name=f"{host}:{port}",
-            url=url,
-            status="DOWN",
-            response_time_ms=None,
-            status_code=None,
-            error=str(e),
-            timestamp=timestamp
-        )
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            start_time = time.time()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            elapsed_ms = (time.time() - start_time) * 1000
+            sock.close()
+
+            if result == 0:
+                return ServiceResult(
+                    name=f"{host}:{port}",
+                    url=url,
+                    status="UP",
+                    response_time_ms=round(elapsed_ms, 2),
+                    status_code=None,
+                    error=None,
+                    timestamp=timestamp,
+                    retries=attempt
+                )
+            else:
+                last_error = f"Connection refused (error code: {result})"
+        except socket.timeout:
+            last_error = "Connection timed out"
+        except socket.gaierror as e:
+            last_error = f"DNS resolution failed: {str(e)}"
+        except OSError as e:
+            last_error = str(e)
+
+        if attempt < max_retries:
+            delay = backoff_base ** attempt
+            time.sleep(delay)
+
+    return ServiceResult(
+        name=f"{host}:{port}",
+        url=url,
+        status="DOWN",
+        response_time_ms=None,
+        status_code=None,
+        error=last_error,
+        timestamp=timestamp,
+        retries=max_retries
+    )
 
 
-def check_service(url: str, timeout: int) -> ServiceResult:
+def check_service(url: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES,
+                   backoff_base: float = DEFAULT_BACKOFF_BASE) -> ServiceResult:
     """Check a service based on its URL scheme."""
     scheme, host, port = parse_service_url(url)
-    
+
     if scheme in ("http", "https"):
-        return check_http_service(url, timeout)
+        return check_http_service(url, timeout, max_retries, backoff_base)
     else:
-        return check_tcp_service(host, port, timeout)
+        return check_tcp_service(host, port, timeout, max_retries, backoff_base)
 
 
 def load_services_from_file(filepath: str) -> List[str]:
@@ -245,36 +226,41 @@ def format_result(result: ServiceResult, verbose: bool = False, no_color: bool =
     reset = "\033[0m" if not no_color else ""
     icon = status_icons.get(result.status, "?")
     color = status_colors.get(result.status, "") if not no_color else ""
-    
+
     if result.response_time_ms is not None:
         time_str = f"{result.response_time_ms}ms"
     else:
         time_str = "-"
-    
+
     if result.status_code is not None:
         code_str = f"[{result.status_code}]"
     else:
         code_str = ""
-    
-    line = f"{color}{icon} {result.name:<30} {result.status:<8} {time_str:>10} {code_str}{reset}"
-    
+
+    retry_str = f" ({result.retries} retries)" if result.retries > 0 else ""
+    line = f"{color}{icon} {result.name:<30} {result.status:<8} {time_str:>10} {code_str}{retry_str}{reset}"
+
     if verbose and result.error:
         line += f"\n   └─ Error: {result.error}"
-    
+
     return line
 
 
-def ping_services(services: List[str], timeout: int, workers: int, verbose: bool) -> List[ServiceResult]:
+def ping_services(services: List[str], timeout: int, workers: int, verbose: bool,
+                  max_retries: int, backoff_base: float) -> List[ServiceResult]:
     """Ping all services concurrently."""
     results = []
-    
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_url = {executor.submit(check_service, url, timeout): url for url in services}
-        
+        future_to_url = {
+            executor.submit(check_service, url, timeout, max_retries, backoff_base): url
+            for url in services
+        }
+
         for future in as_completed(future_to_url):
             result = future.result()
             results.append(result)
-    
+
     results.sort(key=lambda r: (r.status != "UP", r.name))
     return results
 
@@ -286,12 +272,12 @@ def print_summary(results: List[ServiceResult]) -> None:
     degraded = sum(1 for r in results if r.status == "DEGRADED")
     down = sum(1 for r in results if r.status == "DOWN")
     error = sum(1 for r in results if r.status == "ERROR")
-    
+
     print()
     print("=" * 60)
     print(f"Summary: {up} up, {degraded} degraded, {down} down, {error} errors")
     print(f"Total: {total} services checked")
-    
+
     if down > 0 or error > 0:
         sys.exit(1)
 
@@ -305,9 +291,10 @@ Examples:
   %(prog)s https://google.com https://github.com
   %(prog)s -f services.txt
   %(prog)s -f services.txt -t 10 -w 5 -v
+  %(prog)s -f services.txt --retries 3 --backoff 2
         """
     )
-    
+
     parser.add_argument(
         "services",
         nargs="*",
@@ -340,24 +327,39 @@ Examples:
         action="store_true",
         help="Disable colored output"
     )
-    
+    parser.add_argument(
+        "-r", "--retries",
+        type=int,
+        default=DEFAULT_MAX_RETRIES,
+        help="Max retry attempts on failure (default: 0)"
+    )
+    parser.add_argument(
+        "-b", "--backoff",
+        type=float,
+        default=DEFAULT_BACKOFF_BASE,
+        help="Backoff base in seconds: delay = backoff^attempt (default: 2)"
+    )
+
     args = parser.parse_args()
-    
+
     services = list(args.services)
-    
+
     if args.services_file:
         services.extend(load_services_from_file(args.services_file))
-    
+
     if not services:
         parser.print_help()
         print("\nError: No services specified")
         sys.exit(1)
-    
+
     print(f"Pinging {len(services)} service(s) with {args.workers} workers...\n")
     print(f"{'Status':<8} {'Service':<30} {'Response':>10} {'Code':>6}")
     print("-" * 60)
-    
-    results = ping_services(services, args.timeout, args.workers, args.verbose)
+
+    results = ping_services(
+        services, args.timeout, args.workers, args.verbose,
+        args.retries, args.backoff
+    )
 
     for result in results:
         print(format_result(result, args.verbose, args.no_color))
