@@ -51,7 +51,20 @@ python service_pinger.py -f services.txt -t 10 -w 5 -v
 -w, --workers   Concurrent workers (default: 10)
 -v, --verbose   Show error details
 --no-color      Disable colors (for CI/CD)
+-r, --retries   Max retry attempts on failure (default: 0)
+-b, --backoff   Backoff base in seconds: delay = backoff^attempt (default: 2)
 ```
+
+### Retry with exponential backoff
+
+When a service fails, retry up to N times with increasing delays:
+
+```bash
+python service_pinger.py -f services.txt --retries 3 --backoff 2
+```
+
+This retries up to 3 times with delays of 1s, 2s, 4s (2^0, 2^1, 2^2).
+Results that needed retries show `(N retries)` next to the status.
 
 ## Output
 
@@ -80,5 +93,5 @@ Exit code is 1 if anything is down or errored, 0 if all good.
 
 ## Why I made this
 
-Tired of opening 15 browser tabs to check if everything's up after a deploy. 
+Tired of opening 15 browser tabs to check if everything's up after a deploy.
 This does it in one command and I can stick it in CI/CD pipelines.
